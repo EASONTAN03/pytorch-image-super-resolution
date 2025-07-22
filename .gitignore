@@ -1,0 +1,15 @@
+# Ignore image files in the 'data' directory
+data/raw/
+data/processed/
+
+# Ignore all contents within 'results/models' and 'results/plots' directories
+results/models/
+results/plots/
+__pycache__/
+
+backup/
+documents/
+make_dataset.py
+
+.cursorignore
+

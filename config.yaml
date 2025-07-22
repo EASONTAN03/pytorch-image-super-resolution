@@ -1,0 +1,46 @@
+SEED: 42
+
+dataset:
+  train_hr_dir: "data\\raw\\DIV2K\\HR\\train"
+  valid_hr_dir: "data\\raw\\Set5"
+  train_patch_size: 96
+  valid_patch_size: 96
+  stride: 48
+  model_name: "SRCNN"  # Model name for dataset preparation
+  
+train:
+  model: "SRCNN"
+  benchmark: "v1"  # Custom tag for result tracking
+  train_image_dir: "data\\processed\\DIV2K\\cubic_X4_pixels96_stride48\\train"
+  valid_lr_image_dir: "data\\processed\\Set5\\cubic_X4_pixels96_stride48\\valid\\lr"
+  valid_hr_image_dir: "data\\raw\\Set5"
+  SRCNN: 
+    resume: "models/srcnn_x2-T91-7d6e0623.pth.tar"  # Path to pre-trained model
+    parameters:
+      f1: 9
+      f2: 1
+      f3: 5
+      n1: 64
+      n2: 32
+    epochs: 10
+    batch_size: 64
+    model_momentum: 0.9
+    model_lr: 1e-4
+    weight_decay: 
+  SRGAN:
+    resume: "models/srgan_x2-T91-7d6e0623.pth.tar"  # Path to pre-trained model
+    parameters:
+      learning_rate_generator: 1e-4
+      learning_rate_discriminator: 1e-4
+      b1: 0.9
+      b2: 0.999
+      lambda_adversarial: 1e-3
+      lambda_content: 1e-3
+    epochs: 1
+    batch_size: 64
+
+evaluate:
+  lr_dir: "data/Set5/GTmod12"
+  sr_dir: "results/test/SRCNN"
+  hr_dir: "data/Set5/GTmod12"
+  model_path: "results/pretrained_models/srcnn_x2-T91-7d6e0623.pth.tar"
