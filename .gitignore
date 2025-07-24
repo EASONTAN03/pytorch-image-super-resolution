@@ -5,6 +5,9 @@ data/processed/
 # Ignore all contents within 'results/models' and 'results/plots' directories
 results/models/
 results/plots/
+results/evaluates/
+results/*.csv
+
 __pycache__/
 
 backup/
@@ -12,4 +15,3 @@ documents/
 make_dataset.py
 
 .cursorignore
-

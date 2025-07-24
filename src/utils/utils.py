@@ -196,3 +196,52 @@ def save_log(log_path, log_entry):
         json.dump(logs, f, indent=4)
 
     print("Logs updated.")
+
+def rgb2yCbCr(image_tensor: torch.Tensor) -> torch.Tensor:
+    """
+    Converts a batch of RGB images to their Y-channel (luminance) representation.
+    Assumes image_tensor is (N, 3, H, W) and pixel values are float.
+    """
+    # Standard ITU-R BT.601-7 weights for Y (luminance) channel
+    # Y = 0.299 * R + 0.587 * G + 0.114 * B
+    
+    # Split channels. Slicing with `0:1` etc. preserves the channel dimension
+    # making it suitable for broadcasting the weights.
+    R = image_tensor[:, 0:1, :, :]
+    G = image_tensor[:, 1:2, :, :]
+    B = image_tensor[:, 2:3, :, :]
+
+    # Compute Y channel
+    Y = 0.299 * R + 0.587 * G + 0.114 * B
+    
+    return Y
+
+def rgb2yCbCr(image_tensor: torch.Tensor, y_only=True) -> torch.Tensor:
+    """
+    Converts a batch of RGB images to their YCbCr representation.
+    Assumes image_tensor is (N, 3, H, W) and pixel values are in the [0, 1] range.
+    The output YCbCr tensor will also have channels in the [0, 1] range.
+    """
+    # Split channels
+    R = image_tensor[:, 0:1, :, :] # Preserve channel dimension for broadcasting
+    G = image_tensor[:, 1:2, :, :]
+    B = image_tensor[:, 2:3, :, :]
+
+    # Y (Luminance) channel using BT.601-7 weights
+    Y = 0.299 * R + 0.587 * G + 0.114 * B
+    if y_only:
+        return Y  # Return only the Y channel
+
+    # Cb (Blue-difference chroma) channel
+    # The raw calculation results in a range typically around [-0.5, 0.5].
+    # Adding 0.5 shifts it to approximately [0, 1] for normalization.
+    Cb = -0.168736 * R - 0.331264 * G + 0.5 * B + 0.5
+
+    # Cr (Red-difference chroma) channel
+    # Similar to Cb, adding 0.5 shifts it to approximately [0, 1].
+    Cr = 0.5 * R - 0.418688 * G - 0.081312 * B + 0.5
+
+    # Concatenate Y, Cb, Cr channels along the channel dimension
+    yCbCr_tensor = torch.cat([Y, Cb, Cr], dim=1)
+
+    return yCbCr_tensor

@@ -32,7 +32,7 @@ class SRCNN(nn.Module):
         nn.init.normal_(self.conv3.weight, 0.0, 0.001)
         nn.init.zeros_(self.conv3.bias)
 
-def train(train_loader: DataLoader, val_loader: DataLoader, SRCNN_config: dict, save_dirs: dict, SEED: int = 42):
+def train(train_loader: DataLoader, val_loader: DataLoader, SRCNN_config: dict, save_dir: dict, SEED: int = 42):
     """
     Trains the SRCNN model and returns the trained model and training logs.
 
@@ -102,8 +102,8 @@ def train(train_loader: DataLoader, val_loader: DataLoader, SRCNN_config: dict, 
     val_psnr_scores = []
     val_ssim_scores = []
 
-    if save_dirs["resume"] and os.path.exists(save_dirs["resume"]):
-        checkpoint_path = save_dirs["resume"] / "SRCNN_checkpoint.pth"
+    if save_dir["resume"]!=None and os.path.exists(save_dir["resume"]):
+        checkpoint_path = save_dir["resume"] / "SRCNN_checkpoint.pth"
         print(f"Resuming training from checkpoint: {checkpoint_path}")
         checkpoint = torch.load(checkpoint_path)
         model.load_state_dict(checkpoint['model_state_dict'])
@@ -113,8 +113,8 @@ def train(train_loader: DataLoader, val_loader: DataLoader, SRCNN_config: dict, 
         print(f"Resumed from epoch {start_epoch}, with best validation loss: {best_val_loss:.4f}")
     else:
         start_epoch = 0
-        checkpoint_path = save_dirs["models"] / "SRCNN_checkpoint.pth"
-        print(f"Warning: Resume path '{save_dirs['resume']}' not found. Starting training from scratch.")
+        checkpoint_path = save_dir["models"] / "SRCNN_checkpoint.pth"
+        print(f"Warning: Resume path '{save_dir['resume']}' not found. Starting training from scratch.")
 
     for epoch in range(start_epoch, epochs):
         model.train() # Set model to training mode
@@ -142,41 +142,10 @@ def train(train_loader: DataLoader, val_loader: DataLoader, SRCNN_config: dict, 
             optimizer.step()
 
             running_loss += loss.item() * lr_images.size(0)
-            print(f"Batch {batch_idx+1}/{len(train_loader)}, Loss: {loss.item():.6f}")
-
-            # --- Validation after certain batch ---
-            if batch_idx % 1000 == 0:
-                model.eval()
-                val_loss_batch = 0.0
-                val_psnr_batch = 0.0
-                val_ssim_batch = 0.0
-                with torch.no_grad():
-                    for lr_images_val, hr_images_val in val_loader:
-                        if lr_images_val is None or hr_images_val is None:
-                            continue
-
-                        lr_images_val = lr_images_val.to(device, non_blocking=True)
-                        hr_images_val = hr_images_val.to(device, non_blocking=True)
-
-                        outputs_val = model(lr_images_val)
-                        batch_val_loss = criterion(outputs_val, hr_images_val)
-                        val_loss_batch += batch_val_loss.item() * lr_images_val.size(0)
-
-                        val_psnr_batch += psnr_metric(outputs_val, hr_images_val).item() * lr_images_val.size(0)
-                        val_ssim_batch += ssim_metric(outputs_val, hr_images_val).item() * lr_images_val.size(0)
-
-                # Average over the entire validation set
-                avg_val_loss = val_loss_batch / len(val_loader.dataset)
-                avg_val_psnr = val_psnr_batch / len(val_loader.dataset)
-                avg_val_ssim = val_ssim_batch / len(val_loader.dataset)
-
-                print(f"→ Validation after batch {batch_idx+1}: "
-                    f"Loss: {avg_val_loss:.6f}, PSNR: {avg_val_psnr:.4f}, SSIM: {avg_val_ssim:.4f}")
-                model.train()
+            if batch_idx%1000==0:
+                print(f"Batch {batch_idx+1}/{len(train_loader)}, Loss: {loss.item():.6f}")
 
         end_time = time.time()
-        print(f"Epoch [{epoch+1}/{epochs}], Epoch Loss: {epoch_loss:.6f}, Time: {end_time - start_time:.2f}s")
-
         epoch_loss = running_loss / len(train_loader.dataset)
         train_losses.append(epoch_loss)
 

@@ -17,7 +17,7 @@ class ImageSuperResolutionDataset(Dataset):
     using a sliding window approach for training, and full images for validation.
     Grayscale images are explicitly skipped.
     """
-    def __init__(self, hr_image_files: list, upscale_factor: int, interpolation: str, crop_size: int = 96, stride: int = 48, model_name: str = 'SRCNN', mode: str = 'train'):
+    def __init__(self, hr_image_files: list, upscale_factor: int, interpolation: str, crop_size: int = 96, stride: int = 48, model_name: str = 'SRCNN', mode: str = 'train', lr_image_files: str=None):
         """
         Args:
             hr_image_files (list): List of file paths to the original HR images.
@@ -28,6 +28,7 @@ class ImageSuperResolutionDataset(Dataset):
             model_name (str): The model type ('SRCNN' or 'SRGAN') to determine preprocessing.
             mode (str): 'train' for sliding window cropping, 'val' for processing full images.
         """
+        self.lr_image_files = lr_image_files
         self.hr_image_files = hr_image_files
         self.upscale_factor = upscale_factor
         self.crop_size = crop_size
@@ -37,26 +38,32 @@ class ImageSuperResolutionDataset(Dataset):
         self.mode = mode
 
         self.patch_infos = [] # Stores (hr_image_path, y_start, x_start) for each patch or image
+        self.lr_patch_infos = []
 
         if self.mode == 'train':
-            print("Pre-calculating patch coordinates using sliding window for training dataset...")
-            for hr_image_path in hr_image_files:
-                try:
-                    hr_image = cv2.imread(str(hr_image_path), cv2.IMREAD_UNCHANGED)
-                    if hr_image is None:
-                        print(f"Warning: Could not read HR image for patch calculation: {hr_image_path}. Skipping.")
+            if lr_image_files!=None:
+                self.lr_patch_infos=lr_image_files
+                self.patch_infos=hr_image_files
+                print(f"Total training pair images: {len(self.lr_patch_infos)}")
+            else:
+                print("Pre-calculating patch coordinates using sliding window for training dataset...")
+                for hr_image_path in hr_image_files:
+                    try:
+                        hr_image = cv2.imread(str(hr_image_path), cv2.IMREAD_UNCHANGED)
+                        if hr_image is None:
+                            print(f"Warning: Could not read HR image for patch calculation: {hr_image_path}. Skipping.")
+                            continue
+
+                        h_orig, w_orig = hr_image.shape[:2]
+
+                        # Generate all possible sliding window patch coordinates
+                        for y in range(0, h_orig - self.crop_size + 1, self.stride):
+                            for x in range(0, w_orig - self.crop_size + 1, self.stride):
+                                self.patch_infos.append((hr_image_path, y, x))
+                    except Exception as e:
+                        print(f"Error processing image {hr_image_path} for patch calculation: {e}. Skipping.")
                         continue
-
-                    h_orig, w_orig = hr_image.shape[:2]
-
-                    # Generate all possible sliding window patch coordinates
-                    for y in range(0, h_orig - self.crop_size + 1, self.stride):
-                        for x in range(0, w_orig - self.crop_size + 1, self.stride):
-                            self.patch_infos.append((hr_image_path, y, x))
-                except Exception as e:
-                    print(f"Error processing image {hr_image_path} for patch calculation: {e}. Skipping.")
-                    continue
-            print(f"Total {len(self.patch_infos)} patches identified for training.")
+                print(f"Total {len(self.patch_infos)} patches identified for training.")
         elif self.mode == 'val':
             # For validation, each 'item' corresponds to a full image.
             # Store dummy coordinates (0,0) as they won't be used for cropping in validation mode.
@@ -97,35 +104,33 @@ class ImageSuperResolutionDataset(Dataset):
         Retrieves an HR image/patch based on the mode, generates its corresponding LR,
         and applies model-specific preprocessing.
         """
-        hr_image_path, y_coord, x_coord = self.patch_infos[idx]
-        hr_image_raw = cv2.imread(str(hr_image_path), cv2.IMREAD_UNCHANGED)
-        
-        if hr_image_raw is None:
-            print(f"Warning: Could not read HR image: {hr_image_path} at __getitem__. Returning None.")
-            return None 
-
-        # --- Explicitly skip grayscale images and handle channels ---
-        if hr_image_raw.shape[2] == 3: # Already 3-channel BGR
-            hr_image_bgr = hr_image_raw
-        else:
-            print(f"Warning: Unexpected number of channels ({hr_image_raw.shape[2]}) for image {hr_image_path} at __getitem__. Returning None.")
-            return None
         
         lr_image_processed = None
         hr_image_processed = None
 
         if self.mode == 'train':
-            # Extract the specific HR patch using pre-calculated coordinates
-            hr_patch = hr_image_bgr[y_coord : y_coord + self.crop_size, x_coord : x_coord + self.crop_size]
-            hr_image_processed = np.ascontiguousarray(hr_patch) # Ensure contiguous memory
+            if len(self.lr_patch_infos)>0:
+                lr_image_path= self.lr_patch_infos[idx]
+                hr_image_path= self.hr_image_files[idx]
+                lr_image_processed = cv2.imread(str(lr_image_path), cv2.IMREAD_UNCHANGED)
+                hr_image_processed = cv2.imread(str(hr_image_path), cv2.IMREAD_UNCHANGED)
+            else:
+                hr_image_path, y_coord, x_coord = self.patch_infos[idx]
+                hr_image_bgr = cv2.imread(str(hr_image_path), cv2.IMREAD_UNCHANGED)
+        
+                # Extract the specific HR patch using pre-calculated coordinates
+                hr_patch = hr_image_bgr[y_coord : y_coord + self.crop_size, x_coord : x_coord + self.crop_size]
+                hr_image_processed = np.ascontiguousarray(hr_patch) # Ensure contiguous memory
 
-            # Generate LR patch by downscaling the HR patch
-            lr_patch_w = self.crop_size // self.upscale_factor
-            lr_patch_h = self.crop_size // self.upscale_factor
-            lr_image_processed = cv2.resize(hr_image_processed, (lr_patch_w, lr_patch_h), interpolation=self.interpolation_method)
+                # Generate LR patch by downscaling the HR patch
+                lr_patch_w = self.crop_size // self.upscale_factor
+                lr_patch_h = self.crop_size // self.upscale_factor
+                lr_image_processed = cv2.resize(hr_image_processed, (lr_patch_w, lr_patch_h), interpolation=self.interpolation_method)
         
         elif self.mode == 'val':
             # For validation, process the full image (cropped to be divisible by upscale_factor)
+            hr_image_path, y_coord, x_coord = self.patch_infos[idx]
+            hr_image_bgr = cv2.imread(str(hr_image_path), cv2.IMREAD_UNCHANGED)
             hr_image_processed = np.ascontiguousarray(hr_image_bgr) # HR remains the full original image
 
             # Generate LR image from the full HR image
@@ -142,8 +147,10 @@ class ImageSuperResolutionDataset(Dataset):
         hr_tensor = None
 
         if self.model_name == "SRCNN":
+            lr_y_image = cv2.resize(lr_image_processed, (hr_image_processed.shape[1], hr_image_processed.shape[0]), interpolation=cv2.INTER_CUBIC)
+
             # Convert to Y channel and normalize [0, 1] for SRCNN
-            lr_y_image = bgr2ycbcr(lr_image_processed, only_use_y_channel=True)
+            lr_y_image = bgr2ycbcr(lr_y_image, only_use_y_channel=True)
             hr_y_image = bgr2ycbcr(hr_image_processed, only_use_y_channel=True)
 
             lr_y_image = lr_y_image.astype(np.float32) / 255.
@@ -152,6 +159,9 @@ class ImageSuperResolutionDataset(Dataset):
             lr_tensor = to_tensor(lr_y_image, range_norm=False, half=False)
             hr_tensor = to_tensor(hr_y_image, range_norm=False, half=False)
 
+            # print(self.model_name)
+            # print(f"DEBUG: lr_tensor shape from __getitem__: {lr_tensor.shape}")
+            # print(f"DEBUG: hr_tensor shape from __getitem__: {hr_tensor.shape}")
         elif self.model_name == "SRGAN":
             # Convert BGR to RGB and normalize [0, 1] for SRGAN
             lr_image_rgb = cv2.cvtColor(lr_image_processed, cv2.COLOR_BGR2RGB)
@@ -162,6 +172,12 @@ class ImageSuperResolutionDataset(Dataset):
 
             lr_tensor = to_tensor(lr_image_rgb, range_norm=False, half=False)
             hr_tensor = to_tensor(hr_image_rgb, range_norm=False, half=False)
+
+            lr_tensor = lr_tensor.permute(2, 0, 1)
+            hr_tensor = hr_tensor.permute(2, 0, 1)
+
+            # print(f"DEBUG: lr_tensor shape from __getitem__: {lr_tensor.shape}")
+            # print(f"DEBUG: hr_tensor shape from __getitem__: {hr_tensor.shape}")
         else:
             raise ValueError(f"Model name '{self.model_name}' not supported for dataset processing.")
         
@@ -193,15 +209,20 @@ def prepare_data():
 
     # Find paths to the raw HR image files
     train_hr_image_files = find_image_files(base_dirs["root"] / dataset_params['train_hr_dir'])
+    if dataset_params['train_lr_dir']!="":
+        train_lr_image_files = find_image_files(base_dirs["root"] / dataset_params['train_lr_dir'])
+    else:
+        train_lr_image_files=None
     valid_hr_image_files = find_image_files(base_dirs["root"] / dataset_params['valid_hr_dir'])
 
     # Get the upscale factor and model type from the configuration
     scale_factor = dataset_params['upscale_factor']
-    model_type = load_config_data.get('train', {}).get('model', 'SRCNN')
+    model_type = load_config_data['train'].get('model', 'SRCNN')
 
     # Create PyTorch Datasets with on-the-fly processing parameters
     train_dataset = ImageSuperResolutionDataset(
         hr_image_files=train_hr_image_files,
+        lr_image_files=train_lr_image_files,
         upscale_factor=scale_factor,
         crop_size=dataset_params['crop_size'],
         stride=dataset_params['stride'], # Pass stride here
@@ -218,7 +239,7 @@ def prepare_data():
     )
 
     # Create PyTorch DataLoaders
-    batch_size_train = train_config.get(model_type, {}).get('batch_size', 16) 
+    batch_size_train = load_config_data["train"].get(model_type, {}).get('batch_size', 16) 
     train_loader = DataLoader(train_dataset, batch_size=batch_size_train, shuffle=True, num_workers=0)
     valid_loader = DataLoader(valid_dataset, batch_size=1, shuffle=False, num_workers=0) # Batch size 1 often for validation metrics
 

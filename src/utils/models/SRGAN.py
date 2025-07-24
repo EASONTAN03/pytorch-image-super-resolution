@@ -9,6 +9,7 @@ from torch import nn
 from torch import optim
 from torch.utils.data import DataLoader
 from ..metrics import PSNR, SSIM
+from ..utils import *
 import tqdm
 
 class ResidualBlock(nn.Module):
@@ -38,16 +39,16 @@ class ResidualBlock(nn.Module):
 
         out = torch.add(residual, out) # Or simply residual + out
         return out
-
+        
 class UpsampleBlock(nn.Module):
     """
     Upsampling block. Uses Conv2d followed by nn.Upsample and PReLU.
-    Assumes upscale factor of 2. For X4, two such blocks would be used.
     """
-    def __init__(self, in_channels: int, out_channels: int):
+    def __init__(self, in_channels: int, out_channels: int, scale_factor: int = 2):
         super().__init__()
-        self.conv = nn.Conv2d(in_channels, out_channels, kernel_size=3, padding=1, bias=False) # Changed kernel to 3, padding 1 as per common SRGAN practice for upsample blocks, if your original was 9x9 it's for initial/final
-        self.upsample = nn.Upsample(scale_factor=2, mode='nearest') # Or 'bilinear' for smoother results
+        # This convolution should output `out_channels`
+        self.conv = nn.Conv2d(in_channels, out_channels, kernel_size=3, padding=1, bias=False)
+        self.upsample = nn.Upsample(scale_factor=scale_factor, mode='nearest')
         self.prelu = nn.PReLU()
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -65,8 +66,8 @@ class DiscriminatorBlock(nn.Module):
     def __init__(self, in_channels: int, out_channels: int, stride: int = 1, use_bn: bool = True):
         super().__init__()
         self.conv = nn.Conv2d(in_channels, out_channels, kernel_size=3, stride=stride, padding=1, bias=False)
-        self.bn = nn.BatchNorm2d(out_channels, momentum=0.8) if use_bn else None # Keras default momentum is 0.9, PyTorch default is 0.1
-        self.leaky_relu = nn.LeakyReLU(negative_slope=0.2) # alpha=0.2
+        self.bn = nn.BatchNorm2d(out_channels, momentum=0.8) if use_bn else None
+        self.leaky_relu = nn.LeakyReLU(negative_slope=0.2)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         out = self.conv(x)
@@ -74,7 +75,7 @@ class DiscriminatorBlock(nn.Module):
             out = self.bn(out)
         out = self.leaky_relu(out)
         return out
-
+    
 class VGGFeatureExtractor(nn.Module):
     """
     VGG19 based feature extractor for perceptual loss.
@@ -105,17 +106,10 @@ class VGGFeatureExtractor(nn.Module):
 
 
 # --- Main Networks ---
-
 class Generator(nn.Module):
-    """
-    The Generator network for SRGAN.
-    Takes a low-resolution image and outputs a high-resolution image.
-    """
     def __init__(self, in_channels: int = 3, out_channels: int = 3, num_res_blocks: int = 16, upscale_factor: int = 4):
         super().__init__()
-        
-        # Initial convolution layer (from create_gen's first two lines)
-        # Conv2D(64, (9,9), padding="same") => nn.Conv2d(in, 64, 9, padding=4)
+
         self.conv1 = nn.Conv2d(in_channels, 64, kernel_size=9, padding=4, bias=False)
         self.prelu1 = nn.PReLU()
 
@@ -126,14 +120,20 @@ class Generator(nn.Module):
         self.conv2 = nn.Conv2d(64, 64, kernel_size=3, padding=1, bias=False)
         self.bn2 = nn.BatchNorm2d(64, momentum=0.5)
 
-        # Upsampling blocks (for X4, two blocks are needed)
-        # Each UpsampleBlock increases resolution by 2x
+        # Upsampling blocks (for X4, two blocks are needed, each performing 2x upsampling)
         upsample_layers = []
-        num_upsample_blocks = int(torch.log2(torch.tensor(upscale_factor)).item()) # e.g., log2(4)=2
-        for _ in range(num_upsample_blocks):
-            upsample_layers.append(UpsampleBlock(64, 256)) # Keras code used 256 here
+        # Calculate how many 2x upsampling steps are needed (e.g., log2(4) = 2 steps)
+        num_upsample_steps = int(torch.log2(torch.tensor(upscale_factor)).item())
+
+        for _ in range(num_upsample_steps):
+            # Each UpsampleBlock takes 64 channels and outputs 64 channels
+            # It performs 2x spatial upsampling
+            upsample_layers.append(UpsampleBlock(64, 64, scale_factor=2)) # <--- CRITICAL CHANGE HERE
         self.upsample_blocks = nn.Sequential(*upsample_layers)
-        self.final_conv = nn.Conv2d(256, out_channels, kernel_size=9, padding=4) # Assuming output is 3 channels for RGB
+
+        # Final convolution
+        # This now correctly expects 64 channels from the last upsample block
+        self.final_conv = nn.Conv2d(64, out_channels, kernel_size=9, padding=4) # <--- CRITICAL CHANGE HERE
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         # Initial part
@@ -161,43 +161,42 @@ class Generator(nn.Module):
         # Based on your Keras code not having activation, will omit for now.
         return out
 
-
 class Discriminator(nn.Module):
     """
     The Discriminator network for SRGAN.
     Takes a high-resolution image and outputs a probability of it being real/fake.
     """
-    def __init__(self, in_channels: int = 3):
+    # Added hr_image_size to make the discriminator flexible
+    def __init__(self, in_channels: int = 3, hr_image_size: int = 96):
         super().__init__()
         df = 64 # Base filter size
 
-        # Based on create_dics logic
-        self.block1 = DiscriminatorBlock(in_channels, df, stride=1, use_bn=False) # d1
-        self.block2 = DiscriminatorBlock(df, df, stride=2)                     # d2
-        self.block3 = DiscriminatorBlock(df, df * 2, stride=1)                  # d3 (your code has df**2 which is 4096, likely typo for df*2 = 128)
-        self.block4 = DiscriminatorBlock(df * 2, df * 2, stride=2)              # d4
-        self.block5 = DiscriminatorBlock(df * 2, df * 4, stride=1)              # d5 (your code has df**4, likely typo for df*4 = 256)
-        self.block6 = DiscriminatorBlock(df * 4, df * 4, stride=2)              # d6
-        self.block7 = DiscriminatorBlock(df * 4, df * 8, stride=1)              # d7
-        self.block8 = DiscriminatorBlock(df * 8, df * 8, stride=2)              # d8
+        self.block1 = DiscriminatorBlock(in_channels, df, stride=1, use_bn=False)
+        self.block2 = DiscriminatorBlock(df, df, stride=2)
+        self.block3 = DiscriminatorBlock(df, df * 2, stride=1)
+        self.block4 = DiscriminatorBlock(df * 2, df * 2, stride=2)
+        self.block5 = DiscriminatorBlock(df * 2, df * 4, stride=1)
+        self.block6 = DiscriminatorBlock(df * 4, df * 4, stride=2)
+        self.block7 = DiscriminatorBlock(df * 4, df * 8, stride=1)
+        self.block8 = DiscriminatorBlock(df * 8, df * 8, stride=2)
 
-        self.flatten = nn.Flatten() # d8_5
-        self.dense1 = nn.Linear(df * 8 * (6*6), df * 16) # Adjust input features based on actual feature map size
-        # Assuming output of last stride=2 block (d8) results in 6x6     feature map for a 96x96 input.
-        # 96 -> 48 -> 24 -> 12 -> 6 -> 3. (initial, d2, d4, d6, d8)
-        # So, (input_resolution / (2^number_of_stride2_blocks))
-        # If input 96, 4 stride=2 blocks -> 96 / (2^4) = 96/16 = 6. So (6*6).
-        # Your initial input would be 96x96 (HR image).
-        # Let's assume an input size that results in 6x6 after 4 strides of 2.
-        # Example for 96x96 HR input, with 4 stride=2 layers: 96 / (2*2*2*2) = 6x6.
-        # So, df * 8 * 6 * 6 = 2304 * 8 = 18432.
-        # The input feature size calculation for nn.Linear is critical.
-        # For a 96x96 input, 4 stride=2 blocks lead to 6x6.
-        # So, the input features to dense1 should be df*8 * 6*6 = 64*8*36 = 18432.
+        # Calculate the final spatial dimension after all downsampling blocks
+        # There are 4 DiscriminatorBlocks with stride=2 (block2, block4, block6, block8).
+        # This means the spatial dimensions (height and width) are divided by 2^4 = 16.
+        final_spatial_dim = hr_image_size // (2**4) # Use integer division
 
-        self.leaky_relu_dense = nn.LeakyReLU(negative_slope=0.2) # d10, typo was LeakyReLU
+        # Calculate the number of input features for the first dense layer.
+        # This is (channels_out_of_last_conv_block) * (final_height) * (final_width).
+        final_channels = df * 8 # Output channels of self.block8
+
+        self.in_features = final_channels * final_spatial_dim * final_spatial_dim
+
+        self.flatten = nn.Flatten()
+        # The input features for the first dense layer are now dynamically calculated
+        self.dense1 = nn.Linear(self.in_features, df * 16)
+        self.leaky_relu_dense = nn.LeakyReLU(negative_slope=0.2)
         self.output_dense = nn.Linear(df * 16, 1)
-        self.sigmoid = nn.Sigmoid() # validity, activation="sigmoid"
+        self.sigmoid = nn.Sigmoid()
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         out = self.block1(x)
@@ -237,7 +236,7 @@ class SRGAN(nn.Module):
     # The `build_vgg` method you had would be integrated into the VGGFeatureExtractor.
     # The `create_gen` and `create_dics` functions have been turned into Generator and Discriminator classes.
 
-def train(train_loader: DataLoader, valid_loader: DataLoader, SRGAN_config: dict, save_dirs: dict, SEED: int):
+def train(train_loader: DataLoader, valid_loader: DataLoader, SRGAN_config: dict, save_dir: dict, SEED: int):
     """
     Trains the SRGAN model.
 
@@ -245,7 +244,7 @@ def train(train_loader: DataLoader, valid_loader: DataLoader, SRGAN_config: dict
         train_loader (DataLoader): DataLoader for training data.
         valid_loader (DataLoader): DataLoader for validation data.
         SRGAN_config (dict): Training configuration dictionary.
-        save_dirs (dict): Dictionary containing paths for saving models and logs.
+        save_dir (dict): Dictionary containing paths for saving models and logs.
                           Expected keys: 'models', 'resume', 'logs'.
         SEED (int): Random seed for reproducibility.
     """
@@ -270,12 +269,12 @@ def train(train_loader: DataLoader, valid_loader: DataLoader, SRGAN_config: dict
     # Extract hyperparameters from config
     epochs = SRGAN_config['epochs']
     param = SRGAN_config.get('parameters', {})
-    lr_g = param.get('learning_rate_generator', 1e-4)
-    lr_d = param.get('learning_rate_discriminator', 1e-4)
-    b1 = param.get('b1', 0.9)
-    b2 = param.get('b2', 0.999)
-    lambda_adv = param.get('lambda_adversarial', 1e-3)
-    lambda_content = param.get('lambda_content', 1.0)
+    lr_g = float(param.get('learning_rate_generator', 1e-4))
+    lr_d = float(param.get('learning_rate_discriminator', 1e-4))
+    b1 = float(param.get('b1', 0.9))
+    b2 = float(param.get('b2', 0.999))
+    lambda_adv = float(param.get('lambda_adversarial', 1e-3))
+    lambda_content = float(param.get('lambda_content', 1.0))
 
     # Optimizers
     optimizer_G = optim.Adam(generator.parameters(), lr=lr_g, betas=(b1, b2))
@@ -302,12 +301,12 @@ def train(train_loader: DataLoader, valid_loader: DataLoader, SRGAN_config: dict
     best_val_loss_at_best_psnr = float('inf') # Keep track of G loss at best PSNR
 
     # Checkpoint path for saving the best model
-    checkpoint_path = save_dirs["models"] / "SRGAN_checkpoint.pth"
+    checkpoint_path = save_dir["models"] / "SRGAN_checkpoint.pth"
 
     # Resume training if checkpoint exists
     start_epoch = 0
-    if save_dirs.get("resume") and os.path.exists(save_dirs["resume"]):
-        checkpoint_path = save_dirs["resume"] / "SRGAN_checkpoint.pth"
+    if save_dir['resume']!=None and os.path.exists(save_dir["resume"]):
+        checkpoint_path = save_dir["resume"] / "SRGAN_checkpoint.pth"
         if os.path.exists(checkpoint_path):
             print(f"Resuming training from checkpoint: {checkpoint_path}")
             checkpoint = torch.load(checkpoint_path, map_location=device)
@@ -317,7 +316,7 @@ def train(train_loader: DataLoader, valid_loader: DataLoader, SRGAN_config: dict
             optimizer_D.load_state_dict(checkpoint['optimizer_D_state_dict'])
             start_epoch = checkpoint['epoch'] + 1
             best_val_psnr = checkpoint.get('best_val_psnr', best_val_psnr)
-            best_val_loss_at_best_psnr = checkpoint.get('best_val_loss_at_best_psnr', best_val_loss_at_best_psnr)
+            best_val_loss_at_best_psnr = checkpoint.get('best_val_content_loss_at_best_psnr', best_val_loss_at_best_psnr)
             print(f"Resumed from epoch {start_epoch}, with best validation PSNR: {best_val_psnr:.4f}")
         else:
             print(f"Warning: Resume path specified, but checkpoint '{checkpoint_path}' not found. Starting training from scratch.")
@@ -337,7 +336,7 @@ def train(train_loader: DataLoader, valid_loader: DataLoader, SRGAN_config: dict
         running_loss_g = 0.0
         running_loss_d = 0.0
 
-        train_loop = tqdm(train_loader, desc=f"Epoch {epoch+1}/{epochs} - Training", leave=False)
+        train_loop = tqdm.tqdm(train_loader, desc=f"Epoch {epoch+1}/{epochs} - Training", leave=False)
         for batch_idx, (lr_images, hr_images) in enumerate(train_loop):
             if lr_images is None or hr_images is None:
                 train_loop.write(f"Skipping training batch {batch_idx+1} due to None images.")
@@ -421,7 +420,7 @@ def train(train_loader: DataLoader, valid_loader: DataLoader, SRGAN_config: dict
         val_running_d_loss = 0.0
 
         with torch.no_grad():
-            for val_batch_idx, (lr_images_val, hr_images_val) in enumerate(tqdm(valid_loader, desc=f"Epoch {epoch+1}/{epochs} - Validating", leave=False)):
+            for val_batch_idx, (lr_images_val, hr_images_val) in enumerate(tqdm.tqdm(valid_loader, desc=f"Epoch {epoch+1}/{epochs} - Validating", leave=False)):
                 if lr_images_val is None or hr_images_val is None:
                     tqdm.write(f"Skipping validation batch {val_batch_idx+1} due to None images.")
                     continue
@@ -435,9 +434,11 @@ def train(train_loader: DataLoader, valid_loader: DataLoader, SRGAN_config: dict
 
                 gen_hr_images_val = generator(lr_images_val)
                 gen_hr_images_val = torch.clamp(gen_hr_images_val, 0.0, 1.0) # Clamp for accurate PSNR/SSIM
+                gen_hr_images_val_y = rgb2yCbCr(gen_hr_images_val)
+                hr_images_val_y = rgb2yCbCr(hr_images_val)
 
-                val_psnr_sum += psnr_metric(gen_hr_images_val, hr_images_val).item() * lr_images_val.size(0)
-                val_ssim_sum += ssim_metric(gen_hr_images_val, hr_images_val).item() * lr_images_val.size(0)
+                val_psnr_sum += psnr_metric(gen_hr_images_val_y, hr_images_val_y).item() * lr_images_val.size(0)
+                val_ssim_sum += ssim_metric(gen_hr_images_val_y, hr_images_val_y).item() * lr_images_val.size(0)
                 val_samples_count += lr_images_val.size(0)
 
                 # Calculate Generator's validation loss
@@ -448,32 +449,34 @@ def train(train_loader: DataLoader, valid_loader: DataLoader, SRGAN_config: dict
                     gen_hr_images_val_vgg = gen_hr_images_val
                     hr_images_val_vgg = hr_images_val
 
-                val_gen_fake_pred = discriminator(gen_hr_images_val)
-                val_g_adversarial_loss = criterion_adversarial(val_gen_fake_pred, torch.ones_like(val_gen_fake_pred).to(device))
+                # val_gen_fake_pred = discriminator(gen_hr_images_val)
+                # val_g_adversarial_loss = criterion_adversarial(val_gen_fake_pred, torch.ones_like(val_gen_fake_pred).to(device))
                 val_gen_features = vgg_feature_extractor(gen_hr_images_val_vgg)
                 val_hr_features = vgg_feature_extractor(hr_images_val_vgg)
                 val_g_content_loss = criterion_content(val_gen_features, val_hr_features)
-                val_g_loss = lambda_adv * val_g_adversarial_loss + lambda_content * val_g_content_loss
-                val_running_g_loss += val_g_loss.item() * lr_images_val.size(0)
+                # val_g_loss = lambda_adv * val_g_adversarial_loss + lambda_content * val_g_content_loss
+                # val_running_g_loss += val_g_loss.item() * lr_images_val.size(0)
+                val_running_g_loss+=val_g_content_loss.item()
 
                 # Calculate Discriminator's validation loss
-                val_real_pred = discriminator(hr_images_val)
-                val_fake_pred = discriminator(gen_hr_images_val.detach())
-                val_loss_real_d = criterion_adversarial(val_real_pred, torch.ones_like(val_real_pred).to(device) * 0.9)
-                val_loss_fake_d = criterion_adversarial(val_fake_pred, torch.zeros_like(val_fake_pred).to(device) * 0.1)
-                val_d_loss = (val_loss_real_d + val_loss_fake_d) / 2
-                val_running_d_loss += val_d_loss.item() * lr_images_val.size(0)
+                # val_real_pred = discriminator(hr_images_val)
+                # val_fake_pred = discriminator(gen_hr_images_val.detach())
+                # val_loss_real_d = criterion_adversarial(val_real_pred, torch.ones_like(val_real_pred).to(device) * 0.9)
+                # val_loss_fake_d = criterion_adversarial(val_fake_pred, torch.zeros_like(val_fake_pred).to(device) * 0.1)
+                # val_d_loss = (val_loss_real_d + val_loss_fake_d) / 2
+                # val_running_d_loss += val_d_loss.item() * lr_images_val.size(0)
+
 
 
         avg_val_psnr = val_psnr_sum / val_samples_count if val_samples_count > 0 else 0.0
         avg_val_ssim = val_ssim_sum / val_samples_count if val_samples_count > 0 else 0.0
         avg_val_g_loss = val_running_g_loss / val_samples_count if val_samples_count > 0 else 0.0
-        avg_val_d_loss = val_running_d_loss / val_samples_count if val_samples_count > 0 else 0.0
+        # avg_val_d_loss = val_running_d_loss / val_samples_count if val_samples_count > 0 else 0.0
 
         val_psnr_scores.append(avg_val_psnr)
         val_ssim_scores.append(avg_val_ssim)
         val_losses_g.append(avg_val_g_loss)  # Store G loss for validation
-        val_losses_d.append(avg_val_d_loss)  # Store D loss for validation
+        # val_losses_d.append(avg_val_d_loss)  # Store D loss for validation
 
         # Save the best Generator model based on validation PSNR
         if avg_val_psnr > best_val_psnr:
@@ -487,14 +490,14 @@ def train(train_loader: DataLoader, valid_loader: DataLoader, SRGAN_config: dict
                 'optimizer_D_state_dict': optimizer_D.state_dict(),
                 'best_val_psnr': best_val_psnr,
                 'best_val_ssim': avg_val_ssim,
-                'best_val_loss_at_best_psnr': best_val_loss_at_best_psnr
+                'best_val_content_loss_at_best_psnr': best_val_loss_at_best_psnr
             }
             torch.save(checkpoint, checkpoint_path)
             print(f"--> Saved best model checkpoint to {checkpoint_path} (PSNR: {best_val_psnr:.4f})")
 
         print(f"Epoch [{epoch+1}/{epochs}], "
               f"Train G Loss: {avg_train_loss_g:.6f}, Train D Loss: {avg_train_loss_d:.6f}, "
-              f"Validation G Loss: {avg_val_g_loss:.6f}, Validation D Loss: {avg_val_d_loss:.6f}, "
+              f"Validation G Loss: {avg_val_g_loss:.6f}"
               f"Validation PSNR: {avg_val_psnr:.4f}, Validation SSIM: {avg_val_ssim:.4f}, "
               f"Time: {epoch_duration:.2f}s")
 
@@ -507,7 +510,6 @@ def train(train_loader: DataLoader, valid_loader: DataLoader, SRGAN_config: dict
         'train_losses_generator': train_losses_g,
         'train_losses_discriminator': train_losses_d,
         "val_losses_generator": val_losses_g,
-        "val_losses_discriminator": val_losses_d,
         'val_psnr_scores': val_psnr_scores,
         'val_ssim_scores': val_ssim_scores,
     }

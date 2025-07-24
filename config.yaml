@@ -1,34 +1,30 @@
 SEED: 42
 
 dataset:
-  train_hr_dir: "data\\raw\\DIV2K\\HR\\train"
+  train_hr_dir: "data\\processed\\DIV2K\\cubic_X4_pixels96_stride48\\train\\hr" #"data\\raw\\DIV2K\\HR\\train" # 
+  train_lr_dir: "data\\processed\\DIV2K\\cubic_X4_pixels96_stride48\\train\\lr" #""
   valid_hr_dir: "data\\raw\\Set5"
-  train_patch_size: 96
-  valid_patch_size: 96
+  crop_size: 96
   stride: 48
-  model_name: "SRCNN"  # Model name for dataset preparation
+  upscale_factor: 4
+  interpolation: "cubic"
   
 train:
-  model: "SRCNN"
+  model: "SRGAN"
   benchmark: "v1"  # Custom tag for result tracking
-  train_image_dir: "data\\processed\\DIV2K\\cubic_X4_pixels96_stride48\\train"
-  valid_lr_image_dir: "data\\processed\\Set5\\cubic_X4_pixels96_stride48\\valid\\lr"
-  valid_hr_image_dir: "data\\raw\\Set5"
   SRCNN: 
-    resume: "models/srcnn_x2-T91-7d6e0623.pth.tar"  # Path to pre-trained model
+    resume: ""  # Path to pre-trained model models/srcnn_x2-T91-7d6e0623.pth.tar
     parameters:
       f1: 9
       f2: 1
       f3: 5
       n1: 64
       n2: 32
-    epochs: 10
+    epochs: 2
     batch_size: 64
     model_momentum: 0.9
-    model_lr: 1e-4
-    weight_decay: 
   SRGAN:
-    resume: "models/srgan_x2-T91-7d6e0623.pth.tar"  # Path to pre-trained model
+    resume: "SRGAN_v1_20250723_005214"  # Path to pre-trained model
     parameters:
       learning_rate_generator: 1e-4
       learning_rate_discriminator: 1e-4
@@ -36,7 +32,7 @@ train:
       b2: 0.999
       lambda_adversarial: 1e-3
       lambda_content: 1e-3
-    epochs: 1
+    epochs: 10
     batch_size: 64
 
 evaluate:

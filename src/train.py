@@ -15,7 +15,7 @@ from utils.prepare_data import prepare_data
 
 MODEL_MAP = {
     "SRCNN": SRCNN.train, # Assuming SRCNN.train is a static/class method for training
-    # "SRGAN": SRGAN.train, # Add SRGAN.train when implemented
+    "SRGAN": SRGAN.train, # Add SRGAN.train when implemented
 }
 
 # --- Main Training Orchestration Function ---
@@ -40,19 +40,20 @@ def main() -> None:
     # Get current timestamp for unique saving directories and logging
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 
-    model_dir_name = f"{train_config['model']}_{train_config['benchmark']}_{timestamp}"
+    model_name=train_config['model']
+    model_dir_name = f"{model_name}_{train_config['benchmark']}_{timestamp}"
     model_dir = base_dirs['models'] / model_dir_name
     os.makedirs(model_dir, exist_ok=True) # Create the directory if it doesn't exist
     save_dir={
         "models": model_dir,
-        "resume": base_dirs["models"] / train_config.get("model_type", "").get("resume", ""),
+        "resume": base_dirs["models"] / train_config[model_name].get("resume") if train_config[model_name].get("resume") != "" else None,
         "log_path": model_dir / "log.json",
         "results_path": base_dirs["results"] / "model_results.csv"
     }
     print(f"Output models to: {save_dir}")
 
     # --- SRCNN Training Branch ---
-    if train_config["model"] == "SRCNN":
+    if model_name == "SRCNN":
         print("Starting SRCNN training branch.")
         
         # The 'train' function now expects DataLoaders directly and passes SRCNN_config
@@ -96,21 +97,26 @@ def main() -> None:
             "epochs_run": training_logs["epochs_run"],
             "model_name": model_dir_name,
             "dataset_config": config["dataset"],
-            "final_train_loss": training_logs['train_losses'][-1] if training_logs['train_losses'] else None,
-            "final_val_loss": training_logs['val_losses'][-1] if training_logs['val_losses'] else None,
+            "final_train_loss": train_losses[-1] if train_losses else None,
+            "final_val_loss": val_losses[-1] if val_losses else None,
             "best_val_psnr": best_val_psnr,
             "best_val_ssim": best_val_ssim,
             "best_val_loss_at_best_psnr": best_val_loss_at_best_psnr,
+            "train_losses": train_losses,
+            "val_losses": val_losses,
+            "val_psnr_scores": val_psnr_scores,
+            "val_ssim_scores": val_ssim_scores,
             "train_config": train_config["SRCNN"], # Include the SRCNN config used
         }
     # ---  SRGAN Training Branch ---
-    elif train_config["model"] == "SRGAN":
+    elif model_name == "SRGAN":
         print("Starting SRGAN training branch.")
 
-        model, training_logs = SRGAN.train(
+        model, training_logs = MODEL_MAP["SRGAN"](
             train_loader=train_loader,
-            val_loader=valid_loader,
+            valid_loader=valid_loader,
             SRGAN_config=train_config["SRGAN"],
+            save_dir=save_dir,
             SEED=config["SEED"]
         )
 
@@ -119,7 +125,6 @@ def main() -> None:
         train_losses_generator = training_logs['train_losses_generator']
         train_losses_discriminator = training_logs['train_losses_discriminator']
         val_losses_generator = training_logs['val_losses_generator']
-        val_losses_discriminator = training_logs['val_losses_discriminator']
         val_psnr_scores = training_logs['val_psnr_scores']
         val_ssim_scores = training_logs['val_ssim_scores']
 
@@ -131,7 +136,7 @@ def main() -> None:
 
 
         save_training_graph(train_losses_generator, val_losses_generator, "Training and Validation G Loss", "Loss", save_dir["models"] / "g_loss_graph.png")
-        save_training_graph(train_losses_discriminator, val_losses_discriminator, "Training and Validation D Loss", "Loss", save_dir["models"] / "d_loss_graph.png")
+        save_training_graph(train_losses_discriminator, train_losses_discriminator, "Training D Loss", "Loss", save_dir["models"] / "d_loss_graph.png")
         save_training_graph(val_psnr_scores, val_psnr_scores, "Validation PSNR", "PSNR", save_dir["models"] / "val_psnr_graph.png") # PSNR for both train and val usually same for validation
         save_training_graph(val_ssim_scores, val_ssim_scores, "Validation SSIM", "SSIM", save_dir["models"] / "val_ssim_graph.png") # SSIM for both train and val usually same for validation
 
@@ -148,12 +153,16 @@ def main() -> None:
             "final_train_g_loss": train_losses_generator[-1] if train_losses_generator else None,
             "final_train_d_loss": train_losses_discriminator[-1] if train_losses_discriminator else None,
             "final_val_g_loss": val_losses_generator[-1] if val_losses_generator else None,
-            "final_val_d_loss": val_losses_discriminator[-1] if val_losses_discriminator else None,
             "final_val_psnr": val_psnr_scores[-1] if val_psnr_scores else None,
             "final_val_ssim": val_ssim_scores[-1] if val_ssim_scores else None,
             "best_val_psnr": best_val_psnr,
             "best_val_ssim": best_val_ssim,
             "best_val_loss_at_best_psnr": best_val_loss_at_best_psnr,
+            "train_losses_generator": train_losses_generator,
+            "train_losses_discriminator": train_losses_discriminator,
+            "val_losses_generator": val_losses_generator,
+            "val_psnr_scores": val_psnr_scores,
+            "val_ssim_scores": val_ssim_scores,
             "train_config": train_config["SRGAN"],
         }
 
